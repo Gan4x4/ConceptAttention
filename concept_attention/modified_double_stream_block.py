@@ -7,7 +7,8 @@ import torch.nn.functional as F
 
 from concept_attention.flux.src.flux.modules.layers import Modulation, SelfAttention
 from concept_attention.flux.src.flux.math import apply_rope
-
+from torch.nn import BCEWithLogitsLoss
+import torch.optim as optim
 
 def attention(q: Tensor, k: Tensor, v: Tensor, pe: Tensor) -> Tensor:
     q, k = apply_rope(q, k, pe)
@@ -65,8 +66,10 @@ class ModifiedDoubleStreamBlock(nn.Module):
             nn.GELU(approximate="tanh"),
             nn.Linear(mlp_hidden_dim, hidden_size, bias=True),
         )
+        self.gt = None
+        self.bce = BCEWithLogitsLoss()
 
-    @torch.no_grad()
+
     def forward(
         self, 
         img: Tensor, 
@@ -81,6 +84,8 @@ class ModifiedDoubleStreamBlock(nn.Module):
         **kwargs
     ) -> tuple[Tensor, Tensor]:
         assert concept_vec is not None, "Concept vectors must be provided for this implementation."
+        self.gt = torch.randn_like(img)
+        img.requires_grad_(True)
         img_mod1, img_mod2 = self.img_mod(vec)
         txt_mod1, txt_mod2 = self.txt_mod(vec)
         concept_mod1, concept_mod2 = self.txt_mod(concept_vec)
@@ -174,6 +179,33 @@ class ModifiedDoubleStreamBlock(nn.Module):
         else:
             concept_attn = einops.rearrange(concept_attn, "B H L D -> B L (H D)")
             img_attn = einops.rearrange(img_attn, "B H L D -> B L (H D)")
+
+
+        if self.gt is not None:  # compute only when GT given
+            # 1. similarity logits (B, patches)
+            sim = torch.einsum(
+                'bd,bpd->bp',  # dot product  :contentReference[oaicite:1]{index=1}
+                concept_attn[:, 0, :],  # first concept token
+                img_attn)
+            # 2. reshape to (B,1,Hf,Wf) grid
+            h_f = w_f = int(sim.size(-1) ** 0.5)
+            sim = sim.view(-1, 1, h_f, w_f)
+            # 3. upsample to GT resolution
+            sim = F.interpolate(sim,
+                size = self.gt.shape[-2:],  # :contentReference[oaicite:2]{index=2}
+                mode = 'bilinear',
+                align_corners = False)
+            # 4. BCE loss (keeps logits stable)  :contentReference[oaicite:3]{index=3}
+            ce_loss = self.bce(sim.squeeze(1), self.gt.float())
+            print(ce_loss, img.grad)
+            ce_loss.backward()
+            optimizer = optim.SGD([img], lr=0.05)
+            #for i in range(10):
+            optimizer.zero_grad()
+            optimizer.step()
+
+        img.requires_grad_(False)
+
 
         # # Compute the cross attentions
         # cross_attention_maps = einops.einsum(
