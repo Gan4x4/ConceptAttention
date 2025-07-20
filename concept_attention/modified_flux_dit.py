@@ -96,7 +96,12 @@ class ModifiedFluxDiT(nn.Module):
 
         # running on sequences img
         img = self.img_in(img)
-        vec = self.time_in(timestep_embedding(timesteps, 256))
+        # gan4x4
+        embeddings = timestep_embedding(timesteps, 256)
+        embeddings = embeddings.to(img.dtype)  # Ensure embeddings are on the same device as model
+        # gan4x4
+        vec = self.time_in(embeddings)
+
         if self.params.guidance_embed:
             if guidance is None:
                 raise ValueError("Didn't get guidance strength for guidance distilled model.")
@@ -111,7 +116,8 @@ class ModifiedFluxDiT(nn.Module):
         pe_with_concepts = self.pe_embedder(ids_with_concepts)
         ################ Process concept vectors ################
         original_concept_vec = concept_vec
-        concept_vec = self.time_in(timestep_embedding(timesteps, 256))
+        # gan4x4
+        concept_vec = self.time_in(timestep_embedding(timesteps, 256).to(img.dtype))
         if self.params.guidance_embed:
             if guidance is None:
                 raise ValueError("Didn't get guidance strength for guidance distilled model.")
@@ -127,8 +133,9 @@ class ModifiedFluxDiT(nn.Module):
             "cross_attention_image_vectors": [],
         }
         for block in self.double_blocks:
+
             img, txt, concepts, concept_attention_dict = block(
-                img=img, 
+                img=img,
                 txt=txt, 
                 vec=vec, 
                 pe=pe,

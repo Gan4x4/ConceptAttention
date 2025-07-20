@@ -66,9 +66,6 @@ class ModifiedDoubleStreamBlock(nn.Module):
             nn.GELU(approximate="tanh"),
             nn.Linear(mlp_hidden_dim, hidden_size, bias=True),
         )
-        self.gt = None
-        self.bce = BCEWithLogitsLoss()
-
 
     def forward(
         self, 
@@ -84,8 +81,7 @@ class ModifiedDoubleStreamBlock(nn.Module):
         **kwargs
     ) -> tuple[Tensor, Tensor]:
         assert concept_vec is not None, "Concept vectors must be provided for this implementation."
-        self.gt = torch.randn_like(img)
-        img.requires_grad_(True)
+
         img_mod1, img_mod2 = self.img_mod(vec)
         txt_mod1, txt_mod2 = self.txt_mod(vec)
         concept_mod1, concept_mod2 = self.txt_mod(concept_vec)
@@ -180,43 +176,16 @@ class ModifiedDoubleStreamBlock(nn.Module):
             concept_attn = einops.rearrange(concept_attn, "B H L D -> B L (H D)")
             img_attn = einops.rearrange(img_attn, "B H L D -> B L (H D)")
 
-
-        if self.gt is not None:  # compute only when GT given
-            # 1. similarity logits (B, patches)
-            sim = torch.einsum(
-                'bd,bpd->bp',  # dot product  :contentReference[oaicite:1]{index=1}
-                concept_attn[:, 0, :],  # first concept token
-                img_attn)
-            # 2. reshape to (B,1,Hf,Wf) grid
-            h_f = w_f = int(sim.size(-1) ** 0.5)
-            sim = sim.view(-1, 1, h_f, w_f)
-            # 3. upsample to GT resolution
-            sim = F.interpolate(sim,
-                size = self.gt.shape[-2:],  # :contentReference[oaicite:2]{index=2}
-                mode = 'bilinear',
-                align_corners = False)
-            # 4. BCE loss (keeps logits stable)  :contentReference[oaicite:3]{index=3}
-            ce_loss = self.bce(sim.squeeze(1), self.gt.float())
-            print(ce_loss, img.grad)
-            ce_loss.backward()
-            optimizer = optim.SGD([img], lr=0.05)
-            #for i in range(10):
-            optimizer.zero_grad()
-            optimizer.step()
-
-        img.requires_grad_(False)
-
-
         # # Compute the cross attentions
         # cross_attention_maps = einops.einsum(
         #     concept_q,
         #     img_q,
         #     "batch head concepts dim, batch had patches dim -> batch head concepts patches"
         # )
-        # Collect all of the concept attention information 
+        # Collect all of the concept attention information
         concept_attention_dict = {
-            "output_space_concept_vectors": concept_attn.detach(),
-            "output_space_image_vectors": img_attn.detach(),
+            "output_space_concept_vectors": concept_attn, #.detach(),
+            "output_space_image_vectors": img_attn, #.detach(),
             # "cross_attention_maps": cross_attention_maps.detach(),
             "cross_attention_concept_vectors": concept_q.detach(),
             "cross_attention_image_vectors": img_q.detach()
@@ -233,4 +202,78 @@ class ModifiedDoubleStreamBlock(nn.Module):
         concepts = concepts + concept_mod1.gate * self.txt_attn.proj(concept_attn)
         concepts = concepts + concept_mod2.gate * self.txt_mlp((1 + concept_mod2.scale) * self.txt_norm2(concepts) + concept_mod2.shift)
 
+        return img, txt, concepts, concept_attention_dict
+
+
+
+
+
+
+class BPDoubleStreamBlock(ModifiedDoubleStreamBlock):
+
+    def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: float, qkv_bias: bool = False):
+        super().__init__(hidden_size, num_heads, mlp_ratio, qkv_bias)
+        self.bce = BCEWithLogitsLoss()
+        self.gt = None
+
+    def forward(self,
+        img: Tensor,
+        txt: Tensor,
+        vec: Tensor,
+        pe: Tensor,
+        concepts: Tensor,
+        concept_vec: Tensor,
+        concept_pe: Tensor,
+        joint_attention_kwargs=None,
+        normalize_concepts=True,
+        **kwargs
+    ) -> tuple[Tensor, Tensor]:
+        self.gt = torch.randn_like(img)
+        image_with_grad = img.clone().detach().requires_grad_(True)
+        optimizer = optim.Adam([image_with_grad], lr=0.05)
+        for epoch in range(20):
+            optimizer.zero_grad()
+            new_img, txt, concepts, concept_attention_dict = super().forward(
+                image_with_grad, txt.detach(), vec.detach(), pe.detach(), concepts.detach(), concept_vec.detach(), concept_pe.detach(),
+                joint_attention_kwargs=joint_attention_kwargs,
+                normalize_concepts=normalize_concepts,
+                **kwargs
+            )
+
+            # Loss calculation
+            concept_attn = concept_attention_dict['output_space_concept_vectors']
+            img_attn = concept_attention_dict['output_space_image_vectors']
+
+            # 1. similarity logits (B, patches)
+            sim = torch.einsum(
+                'bd,bpd->bp',  # dot product  :contentReference[oaicite:1]{index=1}
+                concept_attn[:, 0, :],  # first concept token
+                img_attn)
+            # 2. reshape to (B,1,Hf,Wf) grid
+            h_f = w_f = int(sim.size(-1) ** 0.5)
+            sim = sim.view(-1, 1, h_f, w_f)
+            # 3. upsample to GT resolution
+            sim = F.interpolate(sim,
+                                size=self.gt.shape[-2:],  # :contentReference[oaicite:2]{index=2}
+                                mode='bilinear',
+                                align_corners=False)
+            # 4. BCE loss (keeps logits stable)  :contentReference[oaicite:3]{index=3}
+            ce_loss = self.bce(sim.squeeze(1), self.gt.float())
+            ce_loss.backward()
+            optimizer.step()
+
+
+        img, txt, concepts, concept_attention_dict = super().forward(
+            image_with_grad.detach(), txt.detach(), vec.detach(), pe.detach(), concepts.detach(), concept_vec.detach(),
+            concept_pe.detach(),
+            joint_attention_kwargs=joint_attention_kwargs,
+            normalize_concepts=normalize_concepts,
+            **kwargs
+        )
+
+        # Return to original code flow
+        for k, v in concept_attention_dict.items():
+            v.detach_()
+
+        # Return the outputs
         return img, txt, concepts, concept_attention_dict

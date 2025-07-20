@@ -12,7 +12,7 @@ from concept_attention.flux.src.flux.util import configs, embed_watermark, load_
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file as load_sft
 
-from concept_attention.modified_double_stream_block import ModifiedDoubleStreamBlock
+from concept_attention.modified_double_stream_block import ModifiedDoubleStreamBlock, BPDoubleStreamBlock
 from concept_attention.modified_flux_dit import ModifiedFluxDiT
 from concept_attention.utils import embed_concepts
 
@@ -68,7 +68,8 @@ class FluxGenerator():
         model_name: str, 
         device: str, 
         offload: bool, 
-        attention_block_class=ModifiedDoubleStreamBlock,
+        #attention_block_class=ModifiedDoubleStreamBlock,
+        attention_block_class=BPDoubleStreamBlock,
         dit_class=ModifiedFluxDiT
     ):
         self.device = torch.device(device)

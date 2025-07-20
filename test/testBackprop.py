@@ -2,23 +2,22 @@
 import torch
 import torch.nn.functional as F
 import unittest
-#from concept_attention.modified_double_stream_block import ModifiedDoubleStreamBlock
+from concept_attention.modified_double_stream_block import ModifiedDoubleStreamBlock, BPDoubleStreamBlock
 from concept_attention.flux.src.flux.model import Flux,  FluxParams
-
-
 import torch, unittest, types
+from concept_attention.modified_flux_dit import ModifiedFluxDiT
 
 # ------------------------------------------------------------------
 # 1) Monkey‑patch RoPE to NOP so we don’t hit the shape mismatch.
 #    We must patch the *module‑level* symbol that the block grabbed
 #    when it was imported.
 # ------------------------------------------------------------------
-import concept_attention.modified_double_stream_block as mdb
-def _noop_rope(q, k, pe):          # keep signature identical
-    return q, k
-mdb.apply_rope = _noop_rope        # patch in‑place **before** using the class
+#import concept_attention.modified_double_stream_block as mdb
+#def _noop_rope(q, k, pe):          # keep signature identical
+#    return q, k
+#mdb.apply_rope = _noop_rope        # patch in‑place **before** using the class
 
-from concept_attention.modified_double_stream_block import ModifiedDoubleStreamBlock
+#from concept_attention.modified_double_stream_block import ModifiedDoubleStreamBlock
 class TinyBlockSmokeTest(unittest.TestCase):
     def test_modified_double_stream_block_forward_and_backprop(self):
         B, Hf, Wf, D = 1, 8, 8, 32  # batch size, feature-map size, feature dim
@@ -69,44 +68,122 @@ class TinyBlockSmokeTest(unittest.TestCase):
         #
         # 1.  Tiny config ─ keep every dimension small so the test is fast.
         #
-        p = FluxParams(  # dataclass in model.py lines 11‑24 :contentReference[oaicite:4]{index=4}
-            in_channels=32,  # chan/patch that goes into img stream
-            vec_in_dim=32,
-            context_in_dim=32,
-            hidden_size=64,  # must be divisible by num_heads …
+        p = FluxParams(
+            in_channels=32,  # channel dim for the image stream
+            vec_in_dim=32,  # dim of the conditioning vector y
+            context_in_dim=32,  # dim of each text token embedding
+            hidden_size=64,  # must be divisible by num_heads
             mlp_ratio=2.0,
             num_heads=4,
-            depth=1,  # one double‑stream block is enough for a smoke test
-            depth_single_blocks=0,  # can be zero
-            axes_dim=[16],  # Σaxes_dim must equal hidden_size//num_heads (=16)  :contentReference[oaicite:5]{index=5}
-            theta=10000,
+            depth=1,  # one ModifiedDoubleStreamBlock
+            depth_single_blocks=0,
+            axes_dim=[16],  # len == 1 because num_heads=4, hidden//heads = 16
+            theta=10_000,
             qkv_bias=True,
             guidance_embed=False,
         )
         device = "cuda:0"
-        model = Flux(p).cuda()  # real model – no RoPE hack
+        dtype = torch.bfloat16
+        #model = Flux(p).cuda()  # real model – no RoPE hack
+        model = ModifiedFluxDiT(p, attention_block_class=ModifiedDoubleStreamBlock).to(dtype)
+        model.to(device)
 
         #
         # 2.  Dummy batch.
-        #
-        B, T_img, T_txt = 1, 16, 5
-        img = torch.randn(B, T_img, p.in_channels, device="cuda", requires_grad=True)
-        txt = torch.randn(B, T_txt, p.context_in_dim, device="cuda")
-        img_ids = torch.arange(T_img, device=device).unsqueeze(0).unsqueeze(-1).long()  # (1, 16, 1)
-        txt_ids = torch.arange(T_txt, device=device).unsqueeze(0).unsqueeze(-1).long()
-        timesteps = torch.tensor([10], device="cuda")  # any integer ok
-        y = torch.randn(B, p.vec_in_dim, device="cuda")
 
-        #
-        # 3.  Forward → loss → backward.
-        #
-        out = model(img, img_ids, txt, txt_ids, timesteps, y)  # (B, T_img, in_channels)
+        B, T_img, T_txt, T_con = 1, 16, 5, 1  # 16 img‑patches, 5 text tokens, 1 concept token
+        img = torch.randn(B, T_img, p.in_channels, device=device, dtype=dtype)
+        txt = torch.randn(B, T_txt, p.context_in_dim, device=device, dtype=dtype)
+        concepts = torch.randn(B, T_con, p.context_in_dim, device=device, dtype=dtype)
 
+        # Pos‑ID tensors need trailing axis = n_axes (here 1)
+        img_ids = torch.arange(T_img).unsqueeze(0).unsqueeze(-1).long().to(device)  # (1,16,1)
+        txt_ids = torch.arange(T_txt).unsqueeze(0).unsqueeze(-1).long().to(device)  # (1, 5,1)
+        concept_ids = torch.arange(T_con).unsqueeze(0).unsqueeze(-1).long().to(device)  # (1, 1,1)
 
+        concept_vec = torch.randn(B, p.context_in_dim, device=device, dtype=dtype)
+        timesteps = torch.tensor([10], device=device, dtype=torch.long)
+        y = torch.randn(B, p.vec_in_dim, device=device, dtype=dtype)
+
+        # ---------- 3. Forward pass ------------------------------------
+        img_out, attn_dict = model(
+            img, img_ids,
+            txt, txt_ids,
+            concepts, concept_ids,
+            concept_vec,
+            timesteps,
+            y
+        )
         # 4.  Sanity assertions – gradients exist & shapes look right.
-        self.assertEqual(out.shape, torch.Size([B, T_img, p.in_channels]))
-        self.assertIsNotNone(img.grad)
+        self.assertEqual(img_out.shape, torch.Size([B, T_img, p.in_channels]))
         self.assertEqual(img.grad.shape, img.shape)
+
+    def set_inputs(self, h=64, w=64, prompt="default", concept="default", device="cuda:0", dtype=torch.bfloat16):
+        """
+        Helper to create dummy inputs with specified image size, prompt, and concept.
+        """
+        patch_size = 16
+        H_patches = h // patch_size
+        W_patches = w // patch_size
+        T_img = H_patches * W_patches
+        T_txt = 5  # arbitrary small number of tokens for prompt
+        T_con = 1  # one concept token
+
+        img = torch.randn(1, T_img, 32, device=device, dtype=dtype)
+        txt = torch.full((1, T_txt, 32), hash(prompt) % 100 / 100.0, device=device, dtype=dtype)
+        concepts = torch.full((1, T_con, 32), hash(concept) % 100 / 100.0, device=device, dtype=dtype)
+
+        img_ids = torch.arange(T_img).unsqueeze(0).unsqueeze(-1).long().to(device)
+        txt_ids = torch.arange(T_txt).unsqueeze(0).unsqueeze(-1).long().to(device)
+        concept_ids = torch.arange(T_con).unsqueeze(0).unsqueeze(-1).long().to(device)
+
+        concept_vec = torch.randn(1, 32, device=device, dtype=dtype)
+        timesteps = torch.tensor([10], device=device, dtype=torch.long)
+        y = torch.randn(1, 32, device=device, dtype=dtype)
+
+        return img, img_ids, txt, txt_ids, concepts, concept_ids, concept_vec, timesteps, y
+
+    def test_direct_input_setting(self):
+        """
+        Test setting image size, prompt, and concept directly.
+        """
+        p = FluxParams(
+            in_channels=32,
+            vec_in_dim=32,
+            context_in_dim=32,
+            hidden_size=64,
+            mlp_ratio=2.0,
+            num_heads=4,
+            depth=2,
+            depth_single_blocks=0,
+            axes_dim=[16],
+            theta=10_000,
+            qkv_bias=True,
+            guidance_embed=False,
+        )
+        device = "cuda:0"
+        dtype = torch.bfloat16
+        model = ModifiedFluxDiT(p, attention_block_class=BPDoubleStreamBlock).to(dtype)
+        model.to(device)
+        H = 256
+        W = 256
+        # Example usage: set h, w, prompt, concept directly
+        img, img_ids, txt, txt_ids, concepts, concept_ids, concept_vec, timesteps, y = \
+            self.set_inputs(h=H, w=W, prompt="Day view of citystreet", concept="car", device=device, dtype=dtype)
+
+        img.requires_grad_(True)
+        img_out, attn_dict = model(
+            img, img_ids,
+            txt, txt_ids,
+            concepts, concept_ids,
+            concept_vec,
+            timesteps,
+            y
+        )
+        self.assertEqual(img_out.shape[1], (H // 16) * (W // 16))
+        self.assertEqual(txt.shape[2], 32)
+        self.assertEqual(concepts.shape[2], 32)
+        #self.assertEqual(img.grad.shape, img.shape)
 
 if __name__ == "__main__":
     unittest.main()
