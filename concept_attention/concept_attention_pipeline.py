@@ -503,32 +503,68 @@ class ConceptAttentionFluxPipeline():
         if not images:
             raise ValueError("No images found for grid creation")
 
+        # Compute averaged images for the extra row and column
+        num_rows = len(images)
+        num_cols = len(images[0])
+
+        row_averages = []
+        for row in images:
+            arr = np.stack([np.array(img).astype(np.float32) for img in row])
+            avg = arr.mean(axis=0).astype(np.uint8)
+            row_averages.append(Image.fromarray(avg))
+
+        col_averages = []
+        for col_idx in range(num_cols):
+            arr = np.stack(
+                [np.array(images[row_idx][col_idx]).astype(np.float32) for row_idx in range(num_rows)]
+            )
+            avg = arr.mean(axis=0).astype(np.uint8)
+            col_averages.append(Image.fromarray(avg))
+
+        all_arr = np.stack([np.array(img).astype(np.float32) for row in images for img in row])
+        overall_avg_image = Image.fromarray(all_arr.mean(axis=0).astype(np.uint8))
+
+        for row, avg_img in zip(images, row_averages):
+            row.append(avg_img)
+
+        images.append(col_averages + [overall_avg_image])
+
         # Calculate grid dimensions
         cell_width = images[0][0].width
         cell_height = images[0][0].height
+        num_cols = len(images[0])
+        num_rows = len(images)
 
         # Add space for borders and labels
-        grid_width = cell_width * len(timesteps) + (len(timesteps) + 1) * border_size + label_size
-        grid_height = cell_height * len(layer_indices) + (len(layer_indices) + 1) * border_size + label_size
+        grid_width = cell_width * num_cols + (num_cols + 1) * border_size + label_size
+        grid_height = cell_height * num_rows + (num_rows + 1) * border_size + label_size
 
         # Create new image with white background
         grid_img = Image.new('RGB', (grid_width, grid_height), 'white')
         draw = ImageDraw.Draw(grid_img)
 
         try:
-            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 10)
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 20)
         except:
             font = ImageFont.load_default()
 
         # Draw timestep labels at the top
-        for col_idx, timestep in enumerate(timesteps):
+        for col_idx in range(num_cols):
+            if col_idx < len(timesteps):
+                label = f"t={timesteps[col_idx]}"
+            else:
+                label = "avg"
             x = label_size + border_size + col_idx * (cell_width + border_size) + cell_width // 2
-            draw.text((x, label_size // 2), f"t={timestep}", fill='black', font=font, anchor="mm")
+            draw.text((x, label_size // 2), label, fill='black', font=font, anchor="mm")
 
         # Draw layer labels on the left
-        for row_idx, layer_idx in enumerate(layer_indices):
+        for row_idx in range(num_rows):
+            if row_idx < len(layer_indices):
+                label = f"L{layer_indices[row_idx]}"
+            else:
+                label = "avg"
             y = label_size + border_size + row_idx * (cell_height + border_size) + cell_height // 2
-            draw.text((label_size // 2, y), f"L{layer_idx}", fill='black', font=font, anchor="mm")
+            draw.text((label_size // 2, y), label, fill='black', font=font, anchor="mm")
 
         # Paste images into grid
         for row_idx, row in enumerate(images):
@@ -538,11 +574,11 @@ class ConceptAttentionFluxPipeline():
                 grid_img.paste(img, (x_offset, y_offset))
 
         # Draw grid lines
-        for i in range(len(timesteps) + 1):
+        for i in range(num_cols + 1):
             x = label_size + i * (cell_width + border_size)
             draw.rectangle([(x, label_size), (x + border_size - 1, grid_height)], fill='black')
 
-        for i in range(len(layer_indices) + 1):
+        for i in range(num_rows + 1):
             y = label_size + i * (cell_height + border_size)
             draw.rectangle([(label_size, y), (grid_width, y + border_size - 1)], fill='black')
 
