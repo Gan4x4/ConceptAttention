@@ -11,6 +11,7 @@ from concept_attention.utils import embed_concepts, linear_normalization
 import torch
 import einops
 from tqdm import tqdm
+from concept_attention.modified_double_stream_block import ModifiedDoubleStreamBlock, BPDoubleStreamBlock
 
 from concept_attention.binary_segmentation_baselines.raw_cross_attention import RawCrossAttentionBaseline, RawCrossAttentionSegmentationModel
 from concept_attention.binary_segmentation_baselines.raw_output_space import RawOutputSpaceBaseline, RawOutputSpaceSegmentationModel
@@ -29,7 +30,9 @@ def compute_heatmaps_from_vectors(
     layer_indices: list[int],
     timesteps: list[int] = list(range(4)),
     softmax: bool = True,
-    normalize_concepts: bool = False
+    normalize_concepts: bool = False,
+    w=64,
+    h=64
 ):
     """
         Accepts image vectors and concept vectors. These can be from cross attentions or attention outputs.  
@@ -73,8 +76,8 @@ def compute_heatmaps_from_vectors(
     heatmaps = einops.rearrange(
         heatmaps,
         "batch concepts (h w) -> batch concepts h w",
-        h=64,
-        w=64
+        h=h, #64,
+        w=w #64
     )
 
     return heatmaps
@@ -89,13 +92,19 @@ class ConceptAttentionFluxPipeline():
         self, 
         model_name: str = "flux-schnell", 
         offload_model=False,
-        device="cuda:0"
+        device="cuda:0",
+        gt = None
     ):
         self.model_name = model_name
         self.offload_model = offload_model
         # Load the generator
+        if gt is not None:
+            attention_block_class = BPDoubleStreamBlock
+        else:
+            attention_block_class = ModifiedDoubleStreamBlock
         self.flux_generator = FluxGenerator(
             model_name=model_name,
+            attention_block_class=attention_block_class,
             offload=offload_model,
             device=device
         )
@@ -142,7 +151,9 @@ class ConceptAttentionFluxPipeline():
             concept_attention_dict["cross_attention_concept_vectors"],
             layer_indices=layer_indices,
             timesteps=timesteps,
-            softmax=softmax
+            softmax=softmax,
+            w=width//16,
+            h=height//16
         )
         # Compute concept the heatmaps
         concept_heatmaps = compute_heatmaps_from_vectors(
@@ -150,7 +161,9 @@ class ConceptAttentionFluxPipeline():
             concept_attention_dict["output_space_concept_vectors"],
             layer_indices=layer_indices,
             timesteps=timesteps,
-            softmax=softmax
+            softmax=softmax,
+            w=width // 16,
+            h=height // 16
         )
 
         concept_heatmaps = concept_heatmaps.to(torch.float32).detach().cpu().numpy()[0]

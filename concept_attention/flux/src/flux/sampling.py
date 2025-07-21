@@ -45,6 +45,7 @@ def prepare(t5: HFEmbedder, clip: HFEmbedder, img: Tensor, prompt: str | list[st
     if isinstance(prompt, str):
         prompt = [prompt]
     txt = t5(prompt)
+    torch.save(txt,"t5.pt")
     if txt.shape[0] == 1 and bs > 1:
         txt = repeat(txt, "1 ... -> bs ...", bs=bs)
     txt_ids = torch.zeros(bs, txt.shape[1], 3)
@@ -53,6 +54,7 @@ def prepare(t5: HFEmbedder, clip: HFEmbedder, img: Tensor, prompt: str | list[st
         vec = clip("")
     else:
         vec = clip(prompt)
+    torch.save(vec, "clip.pt")
     if vec.shape[0] == 1 and bs > 1:
         vec = repeat(vec, "1 ... -> bs ...", bs=bs)
 

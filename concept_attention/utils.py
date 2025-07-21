@@ -16,8 +16,10 @@ def embed_concepts(
     # Code pulled from concept_attention.flux/sampling.py: prepare()
     # Embed each concept separately
     concept_embeddings = []
-    for concept in concepts:
+    for i, concept in enumerate(concepts): #gan4x4
         concept_embedding = t5(concept)
+        # gan4x4
+        torch.save(concept_embedding, f"concept_{i}_{concept}.pt")
         # Pull out the first token
         token_embedding = concept_embedding[0, 0, :] # First token of first prompt
         concept_embeddings.append(token_embedding)
@@ -28,6 +30,7 @@ def embed_concepts(
     # Embed the concepts to a clip vector
     prompt = " ".join(concepts)
     vec = clip(prompt)
+    torch.save(vec, f"concept_clip.pt")
     vec = torch.zeros_like(vec).to(vec.device)
 
     return concept_embeddings, concept_ids, vec
@@ -106,3 +109,59 @@ def batch_intersection_union(predict, target, nclass):
     assert (area_inter <= area_union).all(), \
         "Intersection area should be smaller than Union area"
     return area_inter, area_union
+
+"""
+from concept_attention.concept_attention_pipeline import compute_heatmaps_from_vectors
+import PIL
+def concept_dict2pil(concept_attention_dict, layer_indices, timesteps, softmax,width, height, cmap="viridis", return_pil_heatmaps=True):
+    cross_attention_maps = compute_heatmaps_from_vectors(
+        concept_attention_dict["cross_attention_image_vectors"],
+        concept_attention_dict["cross_attention_concept_vectors"],
+        layer_indices=layer_indices,
+        timesteps=timesteps,
+        softmax=softmax,
+        w=width // 16,
+        h=height // 16
+    )
+    # Compute concept the heatmaps
+    concept_heatmaps = compute_heatmaps_from_vectors(
+        concept_attention_dict["output_space_image_vectors"],
+        concept_attention_dict["output_space_concept_vectors"],
+        layer_indices=layer_indices,
+        timesteps=timesteps,
+        softmax=softmax,
+        w=width // 16,
+        h=height // 16
+    )
+
+    concept_heatmaps = concept_heatmaps.to(torch.float32).detach().cpu().numpy()[0]
+    cross_attention_maps = cross_attention_maps.to(torch.float32).detach().cpu().numpy()[0]
+    # Convert the torch heatmaps to PIL images.
+    if return_pil_heatmaps:
+        concept_heatmaps_min = concept_heatmaps.min()
+        concept_heatmaps_max = concept_heatmaps.max()
+        # Convert to a matplotlib color scheme
+        colored_heatmaps = []
+        for concept_heatmap in concept_heatmaps:
+            concept_heatmap = (concept_heatmap - concept_heatmaps_min) / (concept_heatmaps_max - concept_heatmaps_min)
+            colored_heatmap = plt.get_cmap(cmap)(concept_heatmap)
+            rgb_image = (colored_heatmap[:, :, :3] * 255).astype(np.uint8)
+            colored_heatmaps.append(rgb_image)
+
+        concept_heatmaps = [PIL.Image.fromarray(concept_heatmap) for concept_heatmap in colored_heatmaps]
+
+        cross_attention_min = cross_attention_maps.min()
+        cross_attention_max = cross_attention_maps.max()
+        colored_cross_attention_maps = []
+        for cross_attention_map in cross_attention_maps:
+            cross_attention_map = (cross_attention_map - cross_attention_min) / (
+                        cross_attention_max - cross_attention_min)
+            colored_cross_attention_map = plt.get_cmap(cmap)(cross_attention_map)
+            rgb_image = (colored_cross_attention_map[:, :, :3] * 255).astype(np.uint8)
+            colored_cross_attention_maps.append(rgb_image)
+
+        cross_attention_maps = [PIL.Image.fromarray(cross_attention_map) for cross_attention_map in
+                                colored_cross_attention_maps]
+
+    return concept_heatmaps, cross_attention_maps
+"""

@@ -3,7 +3,8 @@ from concept_attention import ConceptAttentionFluxPipeline
 pipeline = ConceptAttentionFluxPipeline(
     model_name="flux-schnell",
     device="cuda:0",
-    offload_model=True
+    offload_model=True,
+    gt=None
 )
 
 prompt = "A dragon standing on a rock. "
@@ -13,7 +14,7 @@ pipeline_output = pipeline.generate_image(
     prompt=prompt,
     concepts=concepts,
     width=128,
-    height=128,
+    height=128
 )
 
 image = pipeline_output.image

@@ -1,9 +1,12 @@
+import os.path
+
 import torch
 from PIL import Image
 import time
 import numpy as np
 from einops import rearrange
 from transformers import pipeline
+from unittest.mock import MagicMock  # <-- add this import
 
 from concept_attention.flux.src.flux.cli import SamplingOptions
 from concept_attention.flux.src.flux.sampling import denoise, get_noise, get_schedule, prepare, unpack
@@ -15,6 +18,7 @@ from safetensors.torch import load_file as load_sft
 from concept_attention.modified_double_stream_block import ModifiedDoubleStreamBlock, BPDoubleStreamBlock
 from concept_attention.modified_flux_dit import ModifiedFluxDiT
 from concept_attention.utils import embed_concepts
+from glob import glob
 
 def load_flow_model(
     name: str, 
@@ -32,7 +36,9 @@ def load_flow_model(
         and configs[name].repo_flow is not None
         and hf_download
     ):
-        ckpt_path = hf_hub_download(configs[name].repo_id, configs[name].repo_flow)
+        ckpt_path = hf_hub_download(configs[name].repo_id, configs[name].repo_flow,
+                                    local_files_only=True # gan4x4
+                                    )
 
     with torch.device("meta" if ckpt_path is not None else device):
         model = dit_class(configs[name].params, attention_block_class=attention_block_class).to(torch.bfloat16)
@@ -47,6 +53,79 @@ def load_flow_model(
     return model
 
 def get_models(
+    name: str,
+    device: torch.device,
+    offload: bool,
+    is_schnell: bool,
+    attention_block_class=ModifiedDoubleStreamBlock,
+    dit_class=ModifiedFluxDiT
+):
+
+    class TextEncoderMock:
+        def __init__(self, path):
+            self.calls = 0
+            self.emb = []
+            files = glob(os.path.join(path, "*.pt"))
+            files.sort()
+            for file in files:
+                self.emb.append(torch.load(file))
+
+
+        def __call__(self, *args, **kwargs):
+            # Return shape (1, 77, 4096) to match model's expected input
+            # return torch.randn(1, 256, 4096, device="cuda", dtype=torch.bfloat16)
+            #emb = torch.load("t5.pt", weight_only=True)
+            emb = self.emb[self.calls]
+            self.calls += 1
+            return emb
+
+        #def encode(self, *args, **kwargs):
+        #    # For embed_concepts(), return a tensor of shape (768,)
+        #    #return torch.randn(768, device="cuda", dtype=torch.bfloat16)
+        #    return self.emb[0] # for CLIP only
+
+        def to(self, device):
+            return self
+        def cpu(self):
+            return self
+
+    """
+    class SimpleT5Mock:
+        def __call__(self, *args, **kwargs):
+            # Return shape (1, 77, 4096) to match model's expected input
+            #return torch.randn(1, 256, 4096, device="cuda", dtype=torch.bfloat16)
+            emb = torch.load("t5.pt",weight_only=True)
+            return emb 
+            #return torch.randn(1, 256, 4096, device="cuda", dtype=torch.bfloat16)
+        def to(self, device):
+            return self
+        def cpu(self):
+            return self
+
+    class SimpleCLIPMock():
+        def __init__(self, path = "t5.pt"):
+            self.emb = torch.load(path, weight_only=True)
+        def __call__(self, *args, **kwargs):
+            # For prepare(), return a tensor of shape (1, 64, 768) to match model's expected input
+            return torch.randn(1, 768, device="cuda", dtype=torch.bfloat16)
+
+            
+        def encode(self, *args, **kwargs):
+            # For embed_concepts(), return a tensor of shape (768,)
+            return torch.randn(768, device="cuda", dtype=torch.bfloat16)
+        def to(self, device):
+            return self
+        def cpu(self):
+            return self
+    """
+    t5 = TextEncoderMock("data/prompt/dragon/t5")  # Load the T5 mock from a file
+    clip = TextEncoderMock("data/prompt/dragon/clip")  # Load the CLIP mock from a file
+    model = load_flow_model(name, device="cpu" if offload else device, attention_block_class=attention_block_class, dit_class=dit_class)
+    ae = load_ae(name, device="cpu" if offload else device)
+    return model, ae, t5, clip, None
+
+#_original
+def get_models_original(
     name: str, 
     device: torch.device, 
     offload: bool, 
@@ -199,7 +278,8 @@ class FluxGenerator():
         print(f"Done in {t1 - t0:.1f}s.")
         # bring into PIL format
         x = x.clamp(-1, 1)
-        x = embed_watermark(x.float())
+        # gan4x4 disable watermark
+        #x = embed_watermark(x.float())
         x = rearrange(x[0], "c h w -> h w c")
 
         img = Image.fromarray((127.5 * (x + 1.0)).cpu().byte().numpy())
