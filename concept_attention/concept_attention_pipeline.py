@@ -193,6 +193,34 @@ class ConceptAttentionFluxPipeline():
 
             cross_attention_maps = [PIL.Image.fromarray(cross_attention_map) for cross_attention_map in colored_cross_attention_maps]
 
+            # gan4x4
+            # First save individual heatmaps
+            saved_paths = self.save_per_layer_heatmaps(
+                concept_attention_dict=concept_attention_dict,
+                concepts=concepts,
+                layer_indices=layer_indices,
+                timesteps=timesteps,
+                width=width,
+                height=height
+            )
+
+            # Then create grids for each concept
+            for concept in concepts:
+                self.create_heatmap_grid(
+                    concept=concept,
+                    layer_indices=layer_indices,
+                    timesteps=timesteps,
+                    heatmap_type="output"
+                )
+                """
+                self.create_heatmap_grid(
+                    concept=concept,
+                    layer_indices=layer_indices,
+                    timesteps=timesteps,
+                    heatmap_type="cross"
+                )
+                """
+
         return ConceptAttentionPipelineOutput(
             image=image,
             concept_heatmaps=concept_heatmaps,
@@ -344,9 +372,180 @@ class ConceptAttentionFluxPipeline():
 
             cross_attention_maps = [PIL.Image.fromarray(cross_attention_map) for cross_attention_map in colored_cross_attention_maps]
 
+
         return ConceptAttentionPipelineOutput(
             image=image,
             concept_heatmaps=concept_heatmaps,
             cross_attention_maps=cross_attention_maps
         )
 
+#==================================Gan4x4========================================
+    def save_per_layer_heatmaps(
+            self,
+            concept_attention_dict: dict,
+            concepts: list[str],
+            layer_indices: list[int],
+            timesteps: list[int],
+            width: int,
+            height: int,
+            output_dir: str = "layer_heatmaps",
+            softmax: bool = True,
+            cmap: str = "plasma"
+    ) -> dict:
+        """
+        Save heatmaps for each layer and timestep separately, organized by concept.
+        Returns dict with paths to saved images for grid generation.
+        """
+        import os
+        saved_paths = {concept: [] for concept in concepts}
+
+        # Create concept-specific folders
+        for concept in concepts:
+            concept_dir = os.path.join(output_dir, concept)
+            os.makedirs(concept_dir, exist_ok=True)
+
+        for timestep in timesteps:
+            for layer_idx in layer_indices:
+                output_heatmaps = compute_heatmaps_from_vectors(
+                    concept_attention_dict["output_space_image_vectors"],
+                    concept_attention_dict["output_space_concept_vectors"],
+                    layer_indices=[layer_idx],
+                    timesteps=[timestep],
+                    softmax=softmax,
+                    w=width // 16,
+                    h=height // 16
+                )
+                """
+                cross_heatmaps = compute_heatmaps_from_vectors(
+                    concept_attention_dict["cross_attention_image_vectors"],
+                    concept_attention_dict["cross_attention_concept_vectors"],
+                    layer_indices=[layer_idx],
+                    timesteps=[timestep],
+                    softmax=softmax,
+                    w=width // 16,
+                    h=height // 16
+                )
+                """
+                for heatmap_type, heatmaps in [
+                    ("output", output_heatmaps),
+                    #("cross", cross_heatmaps)
+                ]:
+                    heatmaps = heatmaps.to(torch.float32).detach().cpu().numpy()[0]
+                    heatmaps_min = heatmaps.min()
+                    heatmaps_max = heatmaps.max()
+
+                    for concept_idx, concept in enumerate(concepts):
+                        heatmap = heatmaps[concept_idx]
+                        heatmap = (heatmap - heatmaps_min) / (heatmaps_max - heatmaps_min)
+                        colored_heatmap = plt.get_cmap("plasma")(heatmap)  # Using default colormap
+                        rgb_image = (colored_heatmap[:, :, :3] * 255).astype(np.uint8)
+
+                        img = PIL.Image.fromarray(rgb_image)
+                        filename = f"{heatmap_type}_layer{layer_idx}_step{timestep}.png"
+                        save_path = os.path.join(output_dir, concept, filename)
+                        img.save(save_path)
+                        saved_paths[concept].append(save_path)
+
+        return saved_paths
+
+    def create_heatmap_grid(
+            self,
+            concept: str,
+            layer_indices: list[int],
+            timesteps: list[int],
+            input_dir: str = "layer_heatmaps",
+            output_filename: str = None,
+            heatmap_type: str = "output",
+            border_size: int = 2,
+            label_size: int = 30
+    ) -> PIL.Image.Image:
+        """
+        Create a grid of heatmaps with borders and labels for timesteps and layers.
+        """
+        import os
+        from PIL import Image, ImageDraw, ImageFont
+
+        def resize4x(pil):
+            # Open the image
+            image = pil
+
+            # Get the original size
+            width, height = image.size
+
+            # Calculate the new size (4 times larger)
+            new_width = width * 4
+            new_height = height * 4
+
+            # Resize the image
+            resized_image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+
+            return resized_image
+
+
+        if output_filename is None:
+            output_filename = f"{concept}_{heatmap_type}_grid.png"
+
+        # Collect all images for the grid
+        images = []
+        for layer_idx in layer_indices:
+            row_images = []
+            for timestep in timesteps:
+                filename = f"{heatmap_type}_layer{layer_idx}_step{timestep}.png"
+                img_path = os.path.join(input_dir, concept, filename)
+                if os.path.exists(img_path):
+                    img = Image.open(img_path)
+                    img = resize4x(img)
+                    row_images.append(img)
+            if row_images:
+                images.append(row_images)
+
+        if not images:
+            raise ValueError("No images found for grid creation")
+
+        # Calculate grid dimensions
+        cell_width = images[0][0].width
+        cell_height = images[0][0].height
+
+        # Add space for borders and labels
+        grid_width = cell_width * len(timesteps) + (len(timesteps) + 1) * border_size + label_size
+        grid_height = cell_height * len(layer_indices) + (len(layer_indices) + 1) * border_size + label_size
+
+        # Create new image with white background
+        grid_img = Image.new('RGB', (grid_width, grid_height), 'white')
+        draw = ImageDraw.Draw(grid_img)
+
+        try:
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 10)
+        except:
+            font = ImageFont.load_default()
+
+        # Draw timestep labels at the top
+        for col_idx, timestep in enumerate(timesteps):
+            x = label_size + border_size + col_idx * (cell_width + border_size) + cell_width // 2
+            draw.text((x, label_size // 2), f"t={timestep}", fill='black', font=font, anchor="mm")
+
+        # Draw layer labels on the left
+        for row_idx, layer_idx in enumerate(layer_indices):
+            y = label_size + border_size + row_idx * (cell_height + border_size) + cell_height // 2
+            draw.text((label_size // 2, y), f"L{layer_idx}", fill='black', font=font, anchor="mm")
+
+        # Paste images into grid
+        for row_idx, row in enumerate(images):
+            for col_idx, img in enumerate(row):
+                x_offset = label_size + border_size + col_idx * (cell_width + border_size)
+                y_offset = label_size + border_size + row_idx * (cell_height + border_size)
+                grid_img.paste(img, (x_offset, y_offset))
+
+        # Draw grid lines
+        for i in range(len(timesteps) + 1):
+            x = label_size + i * (cell_width + border_size)
+            draw.rectangle([(x, label_size), (x + border_size - 1, grid_height)], fill='black')
+
+        for i in range(len(layer_indices) + 1):
+            y = label_size + i * (cell_height + border_size)
+            draw.rectangle([(label_size, y), (grid_width, y + border_size - 1)], fill='black')
+
+        # Save and return
+        grid_img.save(output_filename)
+        return grid_img
